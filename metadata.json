@@ -1,0 +1,5 @@
+{
+  "name": "Gemini Flappy Bird",
+  "description": "A high-performance, polished Flappy Bird clone built with React, Tailwind CSS, and powered by Gemini for dynamic post-game wisdom.",
+  "requestFramePermissions": []
+}
