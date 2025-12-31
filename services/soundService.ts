@@ -2,14 +2,17 @@
 class SoundService {
   private ctx: AudioContext | null = null;
 
-  private init() {
+  private async init() {
     if (!this.ctx) {
       this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
     }
+    if (this.ctx.state === 'suspended') {
+      await this.ctx.resume();
+    }
   }
 
-  playFlap() {
-    this.init();
+  async playFlap() {
+    await this.init();
     if (!this.ctx) return;
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
@@ -24,8 +27,8 @@ class SoundService {
     osc.stop(this.ctx.currentTime + 0.1);
   }
 
-  playScore() {
-    this.init();
+  async playScore() {
+    await this.init();
     if (!this.ctx) return;
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
@@ -40,8 +43,8 @@ class SoundService {
     osc.stop(this.ctx.currentTime + 0.2);
   }
 
-  playCrash() {
-    this.init();
+  async playCrash() {
+    await this.init();
     if (!this.ctx) return;
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();

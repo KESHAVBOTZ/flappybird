@@ -45,6 +45,7 @@ const lerpColor = (c1: RGB, c2: RGB, t: number): string => {
 
 const App: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>(GameState.START);
+  const gameStateRef = useRef<GameState>(GameState.START);
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(() => {
     return parseInt(localStorage.getItem(STORAGE_KEY_HIGH) || '0', 10);
@@ -74,7 +75,12 @@ const App: React.FC = () => {
     blinkTimer: 0,
   });
 
-  const requestRef = useRef<number>();
+  const requestRef = useRef<number>(0);
+
+  // Sync ref with state for the game loop
+  useEffect(() => {
+    gameStateRef.current = gameState;
+  }, [gameState]);
 
   const initGame = useCallback(() => {
     gameRef.current = {
@@ -107,19 +113,23 @@ const App: React.FC = () => {
   };
 
   const handleJump = useCallback((e?: React.MouseEvent | React.TouchEvent | KeyboardEvent) => {
-    if (e && 'preventDefault' in e) e.preventDefault();
+    if (e) {
+      if ('preventDefault' in e) e.preventDefault();
+      if ('stopPropagation' in e) e.stopPropagation();
+    }
+    
     if (showAd) return;
     
-    if (gameState === GameState.PLAYING) {
+    if (gameStateRef.current === GameState.PLAYING) {
       gameRef.current.bird.velocity = SETTINGS.jumpStrength;
       sounds.playFlap();
       createParticles(SETTINGS.birdX, gameRef.current.bird.y, '#ffffff', 3);
-    } else if (gameState === GameState.START) {
+    } else if (gameStateRef.current === GameState.START) {
       setGameState(GameState.PLAYING);
       initGame();
       sounds.playFlap();
     }
-  }, [gameState, initGame, showAd]);
+  }, [initGame, showAd]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -129,42 +139,71 @@ const App: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleJump]);
 
+  const endGame = async () => {
+    if (gameStateRef.current === GameState.GAME_OVER) return;
+    setGameState(GameState.GAME_OVER);
+    sounds.playCrash();
+    
+    if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+      navigator.vibrate([100, 50, 100]);
+    }
+
+    gameRef.current.shake = 10;
+    createParticles(SETTINGS.birdX, gameRef.current.bird.y, '#f7d302', 15);
+    
+    const currentScore = gameRef.current.score;
+    
+    // Update state and storage
+    const updated = [...topScores, currentScore]
+      .sort((a, b) => b - a)
+      .slice(0, 5);
+    setTopScores(updated);
+    localStorage.setItem(STORAGE_KEY_TOP, JSON.stringify(updated));
+
+    if (currentScore > highScore) {
+      setHighScore(currentScore);
+      localStorage.setItem(STORAGE_KEY_HIGH, currentScore.toString());
+    }
+    
+    setLoadingWisdom(true);
+    const message = await getBirdWisdom(currentScore);
+    setWisdom(message);
+    setLoadingWisdom(false);
+  };
+
   const update = useCallback(() => {
-    const isPaused = showAd || (gameState !== GameState.PLAYING && gameState !== GameState.START && gameState !== GameState.GAME_OVER);
-    if (isPaused) return;
+    const currentStatus = gameStateRef.current;
+    if (showAd) return;
 
     const { bird, pipes, particles } = gameRef.current;
 
-    const blinkThreshold = gameState === GameState.GAME_OVER ? 120 : 250;
+    const blinkThreshold = currentStatus === GameState.GAME_OVER ? 120 : 250;
     gameRef.current.blinkTimer++;
     if (gameRef.current.blinkTimer > blinkThreshold) {
       gameRef.current.blinkTimer = 0;
     }
 
     let flapSpeed;
-    if (gameState === GameState.START) {
+    if (currentStatus === GameState.START) {
       flapSpeed = 0.12;
-    } else if (gameState === GameState.GAME_OVER) {
+    } else if (currentStatus === GameState.GAME_OVER) {
       flapSpeed = 0.05;
     } else {
       const vel = bird.velocity;
-      if (vel < 0) {
-        flapSpeed = lerp(0.35, 0.55, Math.abs(vel) / 6);
-      } else {
-        flapSpeed = lerp(0.2, 0.7, Math.min(1, vel / 10));
-      }
+      flapSpeed = vel < 0 ? lerp(0.35, 0.55, Math.abs(vel) / 6) : lerp(0.2, 0.7, Math.min(1, vel / 10));
     }
     gameRef.current.wingPhase += flapSpeed;
 
-    if (gameState === GameState.GAME_OVER) return;
+    if (currentStatus === GameState.GAME_OVER) return;
 
-    if (gameState === GameState.START) {
+    if (currentStatus === GameState.START) {
       bird.y = 300 + Math.sin(gameRef.current.frameCount * 0.05) * 15;
       gameRef.current.frameCount++;
       gameRef.current.parallaxX = (gameRef.current.parallaxX + 0.2) % 800;
       return;
     }
 
+    // Physics
     bird.velocity += SETTINGS.gravity;
     bird.y += bird.velocity;
     bird.rotation = Math.min(Math.PI / 4, Math.max(-Math.PI / 8, bird.velocity * 0.12));
@@ -201,7 +240,7 @@ const App: React.FC = () => {
       if (!pipe.passed && pipe.x + SETTINGS.pipeWidth < SETTINGS.birdX) {
         pipe.passed = true;
         gameRef.current.score++;
-        setScore(gameRef.current.score);
+        setScore(gameRef.current.score); // Sync for UI
         sounds.playScore();
       }
 
@@ -222,68 +261,9 @@ const App: React.FC = () => {
       if (collides(birdBox, topPipeBox) || collides(birdBox, bottomPipeBox)) {
         endGame(); return;
       }
-      if (pipe.x + SETTINGS.pipeWidth < -50) pipes.splice(i, 1);
+      if (pipe.x + SETTINGS.pipeWidth < -100) pipes.splice(i, 1);
     }
-  }, [showAd, gameState]);
-
-  const updateLeaderboard = (newScore: number) => {
-    const updated = [...topScores, newScore]
-      .sort((a, b) => b - a)
-      .slice(0, 5);
-    setTopScores(updated);
-    localStorage.setItem(STORAGE_KEY_TOP, JSON.stringify(updated));
-
-    if (newScore > highScore) {
-      setHighScore(newScore);
-      localStorage.setItem(STORAGE_KEY_HIGH, newScore.toString());
-    }
-  };
-
-  const endGame = async () => {
-    if (gameState === GameState.GAME_OVER) return;
-    setGameState(GameState.GAME_OVER);
-    sounds.playCrash();
-    
-    // Haptic feedback simulation for native apps
-    if ('vibrate' in navigator) {
-      navigator.vibrate(100);
-    }
-
-    gameRef.current.shake = 10;
-    createParticles(SETTINGS.birdX, gameRef.current.bird.y, '#f7d302', 15);
-    
-    const currentScore = gameRef.current.score;
-    updateLeaderboard(currentScore);
-    
-    setLoadingWisdom(true);
-    const message = await getBirdWisdom(currentScore);
-    setWisdom(message);
-    setLoadingWisdom(false);
-  };
-
-  const handleWatchAd = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setShowAd(true);
-    setAdTimer(5);
-    setCanRevive(false);
-    const timer = setInterval(() => {
-      setAdTimer((prev) => {
-        if (prev <= 1) { clearInterval(timer); return 0; }
-        return prev - 1;
-      });
-    }, 1000);
-  };
-
-  const handleRevive = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setShowAd(false);
-    setGameState(GameState.PLAYING);
-    gameRef.current.pipes = gameRef.current.pipes.filter(p => p.x > SETTINGS.birdX + 200 || p.x < SETTINGS.birdX - 100);
-    gameRef.current.bird.velocity = -3;
-    gameRef.current.bird.y = 300;
-    setWisdom("");
-    sounds.playFlap();
-  };
+  }, [showAd, topScores, highScore]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -310,6 +290,7 @@ const App: React.FC = () => {
     ctx.fillStyle = skyGrad; 
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+    // Parallax
     const buildingOpacity = lerp(1.0, 0.4, Math.min(scoreVal / 40, 0.8));
     ctx.globalAlpha = buildingOpacity;
     ctx.fillStyle = '#6ab8c0';
@@ -321,6 +302,7 @@ const App: React.FC = () => {
     }
     ctx.globalAlpha = 1.0;
 
+    // Pipes
     gameRef.current.pipes.forEach(pipe => {
       const groundY = canvas.height - 40;
       const bottomY = pipe.topHeight + SETTINGS.pipeGap;
@@ -346,16 +328,19 @@ const App: React.FC = () => {
       ctx.strokeRect(pipe.x - 5, bottomY, SETTINGS.pipeWidth + 10, 35);
     });
 
+    // Ground
     ctx.fillStyle = '#ded895'; ctx.fillRect(0, canvas.height - 40, canvas.width, 40);
     ctx.strokeStyle = '#543847'; ctx.lineWidth = 4; ctx.strokeRect(-2, canvas.height - 40, canvas.width + 4, 42);
 
+    // Particles
     gameRef.current.particles.forEach(p => {
       ctx.globalAlpha = p.life; ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y, 4, 4);
     });
     ctx.globalAlpha = 1.0;
 
+    // Bird
     const { bird, wingPhase, blinkTimer } = gameRef.current;
-    if (gameState !== GameState.GAME_OVER || gameRef.current.shake > 0) {
+    if (gameStateRef.current !== GameState.GAME_OVER || gameRef.current.shake > 0) {
       ctx.save(); 
       ctx.translate(SETTINGS.birdX, bird.y); 
       ctx.rotate(bird.rotation);
@@ -396,7 +381,7 @@ const App: React.FC = () => {
       ctx.fill();
       ctx.stroke();
 
-      const blinkWindow = gameState === GameState.GAME_OVER ? 10 : 8;
+      const blinkWindow = gameStateRef.current === GameState.GAME_OVER ? 10 : 8;
       const isBlinking = blinkTimer < blinkWindow || (gameRef.current.shake > 5 && (gameRef.current.frameCount % 10 < 5));
       const eyeScaleY = isBlinking ? 0.05 : 1.0;
       
@@ -408,7 +393,6 @@ const App: React.FC = () => {
       if (!isBlinking) {
         ctx.fillStyle = 'black'; ctx.beginPath(); ctx.arc(2, 0, 2, 0, Math.PI * 2); ctx.fill();
         ctx.fillStyle = 'white'; ctx.beginPath(); ctx.arc(1.2, -1.2, 0.9, 0, Math.PI * 2); ctx.fill();
-        ctx.globalAlpha = 0.5; ctx.beginPath(); ctx.arc(2.5, 0.5, 0.4, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1.0;
       } else {
         ctx.strokeStyle = '#543847'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(-4, 0); ctx.lineTo(4, 0); ctx.stroke();
       }
@@ -419,11 +403,12 @@ const App: React.FC = () => {
     }
     ctx.restore();
 
-    if (gameState === GameState.PLAYING) {
+    // Score Overlay
+    if (gameStateRef.current === GameState.PLAYING) {
       ctx.fillStyle = 'white'; ctx.strokeStyle = 'black'; ctx.lineWidth = 6; ctx.font = '40px "Press Start 2P"'; ctx.textAlign = 'center';
-      ctx.strokeText(score.toString(), canvas.width / 2, 100); ctx.fillText(score.toString(), canvas.width / 2, 100);
+      ctx.strokeText(gameRef.current.score.toString(), canvas.width / 2, 100); ctx.fillText(gameRef.current.score.toString(), canvas.width / 2, 100);
     }
-  }, [gameState, score]);
+  }, []);
 
   const loop = useCallback(() => {
     update(); draw(); requestRef.current = requestAnimationFrame(loop);
@@ -434,10 +419,34 @@ const App: React.FC = () => {
     return () => { if (requestRef.current) cancelAnimationFrame(requestRef.current); };
   }, [loop]);
 
+  const handleWatchAd = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowAd(true);
+    setAdTimer(5);
+    setCanRevive(false);
+    const timer = setInterval(() => {
+      setAdTimer((prev) => {
+        if (prev <= 1) { clearInterval(timer); return 0; }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
+  const handleRevive = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowAd(false);
+    setGameState(GameState.PLAYING);
+    gameRef.current.pipes = gameRef.current.pipes.filter(p => p.x > SETTINGS.birdX + 200 || p.x < SETTINGS.birdX - 100);
+    gameRef.current.bird.velocity = -3;
+    gameRef.current.bird.y = 300;
+    setWisdom("");
+    sounds.playFlap();
+  };
+
   return (
     <div 
       className="relative w-full h-screen flex items-center justify-center bg-zinc-950 overflow-hidden touch-none" 
-      onMouseDown={() => handleJump()}
+      onMouseDown={(e) => handleJump(e)}
       onTouchStart={(e) => handleJump(e)}
     >
       <div className="relative bg-black shadow-[0_0_50px_rgba(0,0,0,0.5)] border-4 border-zinc-800 rounded-xl overflow-hidden flex flex-col items-center justify-center max-w-full max-h-full">
@@ -451,7 +460,7 @@ const App: React.FC = () => {
             </div>
             <div className="w-full aspect-video bg-zinc-900 rounded-2xl flex flex-col items-center justify-center mb-8 border-2 border-zinc-800 shadow-2xl relative overflow-hidden group">
               <div className="absolute inset-0 bg-blue-500/5 animate-pulse"></div>
-              <div className="text-zinc-700 text-6xl font-black opacity-20 group-hover:opacity-30 transition-opacity">AI AD</div>
+              <div className="text-zinc-700 text-6xl font-black opacity-20 group-hover:opacity-30 transition-opacity uppercase">REWARD</div>
             </div>
             <h3 className="text-2xl font-black mb-2 tracking-tighter uppercase">Second Flight?</h3>
             {adTimer > 0 ? (
@@ -466,7 +475,7 @@ const App: React.FC = () => {
                 REVIVE NOW
               </button>
             )}
-            <p className="text-[8px] text-zinc-600 mt-6 font-mono tracking-widest">pub-8615789090438802</p>
+            <p className="text-[8px] text-zinc-600 mt-6 font-mono tracking-widest uppercase">pub-8615789090438802</p>
           </div>
         )}
 
@@ -474,19 +483,19 @@ const App: React.FC = () => {
           <div className="absolute inset-0 bg-black/40 flex flex-col items-center justify-center text-white p-6 text-center select-none pointer-events-none backdrop-blur-[2px]">
             <h1 className="text-4xl font-bold mb-8 drop-shadow-[0_4px_0_rgba(0,0,0,1)] animate-pulse tracking-tighter">FLAPPY GEMINI</h1>
             <div className="bg-yellow-400 p-6 border-4 border-white text-black rounded-lg shadow-xl scale-110">
-              <p className="text-sm font-bold">TAP TO START</p>
+              <p className="text-sm font-bold uppercase">TAP TO START</p>
             </div>
           </div>
         )}
 
         {gameState === GameState.GAME_OVER && (
-          <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center text-white p-6 text-center select-none overflow-y-auto animate-in fade-in zoom-in duration-300">
-            <div className="flex flex-col items-center mb-1">
+          <div className="absolute inset-0 bg-black/95 flex flex-col items-center justify-center text-white p-6 text-center select-none overflow-y-auto animate-in fade-in zoom-in duration-300">
+            <div className="flex flex-col items-center mb-2">
               <span className="text-[9px] text-zinc-500 tracking-[0.3em] uppercase mb-1">TOTAL SCORE</span>
               <span className="text-7xl font-black text-white tabular-nums drop-shadow-[0_0_15px_rgba(255,255,255,0.3)]">{score}</span>
             </div>
 
-            <h2 className="text-2xl font-black mb-6 text-red-600 drop-shadow-[0_4px_0_rgba(0,0,0,1)] italic tracking-tighter uppercase scale-x-110">FLAP OVER!</h2>
+            <h2 className="text-2xl font-black mb-6 text-red-600 drop-shadow-[0_4px_0_rgba(0,0,0,1)] italic tracking-tighter uppercase scale-x-110">CRASHED!</h2>
             
             <div className="w-full max-w-[280px] mb-6">
               {canRevive ? (
@@ -494,36 +503,32 @@ const App: React.FC = () => {
                   <div className="absolute inset-0 bg-blue-500/0 group-hover:bg-blue-500/5 transition-colors"></div>
                   <div className="flex items-center gap-3 relative z-10">
                     <span className="bg-blue-600 text-white text-[9px] px-2 py-1 rounded-md font-bold shadow-inner">[AD]</span>
-                    <span className="text-[11px] uppercase tracking-tighter">Watch to Revive</span>
+                    <span className="text-[11px] uppercase tracking-tighter">REVIVE FLIGHT</span>
                   </div>
                   <span className="text-xl relative z-10">❤️</span>
                 </button>
               ) : (
                 <div className="bg-zinc-800/40 p-4 rounded-2xl border border-zinc-700/50 text-zinc-600 text-[9px] italic flex items-center justify-center gap-2">
-                   <span className="opacity-50">⚡</span> REVIVE ALREADY USED
+                   <span className="opacity-50">⚡</span> REVIVE CONSUMED
                 </div>
               )}
             </div>
 
             <div className="w-full max-w-[280px] bg-zinc-900/90 border-2 border-zinc-800 rounded-3xl p-5 mb-6 shadow-2xl">
               <p className="text-[9px] text-zinc-500 tracking-[0.2em] uppercase mb-4 text-left font-bold border-b border-zinc-800 pb-2 flex items-center gap-2">
-                 <span className="w-1.5 h-1.5 bg-yellow-500 rounded-full animate-pulse"></span> HALL OF FAME
+                 <span className="w-1.5 h-1.5 bg-yellow-500 rounded-full animate-pulse"></span> HIGHSCORES
               </p>
               
               <div className="space-y-2">
-                {topScores.length === 0 ? (
-                  <p className="text-[9px] text-zinc-600 italic">No flights recorded yet.</p>
-                ) : (
-                  topScores.map((s, i) => (
+                {topScores.map((s, i) => (
                     <div key={i} className={`flex justify-between items-center p-2 rounded-lg border border-white/5 ${i === 0 ? 'bg-yellow-400/5 border-yellow-400/20' : 'bg-white/5'}`}>
                       <div className="flex items-center gap-2">
                         <span className={`text-[10px] font-bold ${i === 0 ? 'text-yellow-400' : 'text-zinc-500'}`}>#{i + 1}</span>
-                        <span className="text-[11px] font-black uppercase text-zinc-300">Pilot</span>
+                        <span className="text-[11px] font-black uppercase text-zinc-300">Bird</span>
                       </div>
                       <span className={`font-black text-sm ${i === 0 ? 'text-yellow-400' : 'text-white'}`}>{s}</span>
                     </div>
-                  ))
-                )}
+                ))}
               </div>
 
               {wisdom && (
@@ -540,14 +545,14 @@ const App: React.FC = () => {
               onMouseDown={(e) => { e.stopPropagation(); initGame(); setGameState(GameState.PLAYING); }}
             >
               <div className="absolute inset-0 bg-white/20 -translate-x-full group-hover:translate-x-full transition-transform duration-700 skew-x-12"></div>
-              NEW FLIGHT
+              PLAY AGAIN
             </button>
           </div>
         )}
       </div>
       
       <div className="absolute bottom-6 right-6 text-white/5 text-[8px] pointer-events-none uppercase tracking-widest font-mono">
-        Native Build Readiness v3.0 | HAPTIC_ENABLED
+        Native Engine v3.1 | KOTLIN_INTEROP
       </div>
     </div>
   );
